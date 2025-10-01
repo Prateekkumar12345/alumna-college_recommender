@@ -9,3 +9,4 @@ bcrypt
 fastapi
 uvicorn
 langchain-openai
+psycopg2
