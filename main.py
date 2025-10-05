@@ -36,9 +36,9 @@ logger = logging.getLogger(__name__)
 
 # FastAPI app
 app = FastAPI(
-    title="Fixed Dual-Chain Academic Chatbot API",
-    description="Academic chatbot with improved intent detection for general conversations and college recommendations",
-    version="3.0.0"
+    title="Enhanced 5-Intent Academic Chatbot API",
+    description="Academic chatbot with 5 intents: Academic, Recommendations, Comparison, College Details, General Queries",
+    version="4.0.0"
 )
 
 # Request/Response models
@@ -64,6 +64,7 @@ class ChatResponse(BaseModel):
     timestamp: str
     conversation_title: Optional[str] = None
     recommendations: Optional[List[CollegeRecommendation]] = []
+    intent_type: Optional[str] = None
 
 class UserPreferences(BaseModel):
     """User preferences extracted from conversation"""
@@ -270,7 +271,6 @@ class CollegeDataManager:
             conn = self.get_connection()
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             
-            # Query to get all colleges
             cursor.execute('SELECT * FROM college')
             colleges_data = cursor.fetchall()
             cursor.close()
@@ -299,8 +299,29 @@ class CollegeDataManager:
             logger.error(f"Error loading college data: {e}")
             return []
     
+    def search_college_by_name(self, college_name: str) -> Optional[College]:
+        """Search for a specific college by name"""
+        college_name_lower = college_name.lower()
+        
+        for college in self.colleges:
+            if college_name_lower in college.name.lower():
+                return college
+        
+        return None
+    
+    def search_colleges_for_comparison(self, college_names: List[str]) -> List[College]:
+        """Search for multiple colleges for comparison"""
+        found_colleges = []
+        
+        for name in college_names:
+            college = self.search_college_by_name(name)
+            if college:
+                found_colleges.append(college)
+        
+        return found_colleges
+    
     def filter_colleges_by_preferences(self, preferences: UserPreferences) -> List[Dict]:
-        """Filter colleges based on user preferences with improved matching"""
+        """Filter colleges based on user preferences"""
         matching_colleges = []
         
         for college in self.colleges:
@@ -308,12 +329,11 @@ class CollegeDataManager:
             match_reasons = []
             missing_criteria = []
             
-            # PRIORITY 1: Specific Institution Type (IIT, NIT, IIIT, etc.)
+            # PRIORITY 1: Specific Institution Type
             if preferences.specific_institution_type:
                 institution_type = preferences.specific_institution_type.upper()
                 college_name_upper = college.name.upper()
                 
-                # Check for exact institution type match
                 institution_matches = {
                     'IIT': ['IIT', 'INDIAN INSTITUTE OF TECHNOLOGY'],
                     'NIT': ['NIT', 'NATIONAL INSTITUTE OF TECHNOLOGY'],
@@ -340,7 +360,7 @@ class CollegeDataManager:
                     missing_criteria.append(f"Not a {institution_type} institution")
                     continue
             
-            # PRIORITY 2: Location filtering
+            # Location filtering
             location_match = True
             if preferences.location:
                 location_terms = [preferences.location.lower()]
@@ -361,7 +381,7 @@ class CollegeDataManager:
                     if not preferences.specific_institution_type:
                         continue
             
-            # PRIORITY 3: College type filtering
+            # College type filtering
             if preferences.college_type:
                 if preferences.college_type.lower() in college.type.lower():
                     match_score += 20
@@ -371,8 +391,7 @@ class CollegeDataManager:
                     if not preferences.specific_institution_type:
                         continue
             
-            # PRIORITY 4: Course type filtering
-            course_match = True
+            # Course type filtering
             if preferences.course_type or preferences.specific_course:
                 college_courses = college.courses.lower()
                 
@@ -396,7 +415,7 @@ class CollegeDataManager:
                     if not preferences.specific_institution_type:
                         continue
             
-            # PRIORITY 5: Level filtering
+            # Level filtering
             if preferences.level:
                 if preferences.level.lower() in college.courses.lower():
                     match_score += 10
@@ -414,7 +433,7 @@ class CollegeDataManager:
         return matching_colleges[:10]
 
 class SmartIntentDetector:
-    """Enhanced intent detection with precise classification"""
+    """Enhanced intent detection with 5 precise categories"""
     
     def __init__(self, llm):
         self.llm = llm
@@ -431,38 +450,46 @@ INTENT CATEGORIES:
 1. GREETING - Simple greetings, casual conversation starters (hi, hello, how are you)
 2. ACADEMIC_HELP - Questions about studies, subjects, exams, learning strategies, homework help
 3. COLLEGE_RECOMMENDATION - Explicitly asking for college/university recommendations or suggestions
-4. CAREER_GUIDANCE - General career advice, "what should I do after 12th", pathway discussions
-5. DUAL_INTENT - Explicitly requesting both guidance AND specific college recommendations
+4. COLLEGE_COMPARISON - Comparing 2 or more colleges (keywords: compare, vs, versus, difference between, which is better)
+5. COLLEGE_DETAILS - Asking about a SPECIFIC single college/university (tell me about X college, what about X university)
+6. GENERAL_QUERY - General knowledge questions not related to academics (news, sports, entertainment, general facts)
+7. CAREER_GUIDANCE - General career advice, "what should I do after 12th", pathway discussions
 
 RULES FOR CLASSIFICATION:
-- COLLEGE_RECOMMENDATION: Must contain explicit request words like "recommend", "suggest", "which college", "list colleges", "show me colleges"
+- COLLEGE_COMPARISON: Must mention 2+ colleges with comparison keywords (compare, vs, difference, which is better)
+- COLLEGE_DETAILS: Must ask about a SPECIFIC single college by name (tell me about UPES, what is IIT Delhi like)
+- COLLEGE_RECOMMENDATION: Contains "recommend", "suggest", "which college", "list colleges", "show me colleges"
+- GENERAL_QUERY: Non-academic questions about world, current events, entertainment, sports, general knowledge
 - ACADEMIC_HELP: Questions about studying, subjects, concepts, exam preparation
 - CAREER_GUIDANCE: General advice about career paths, options after education
 - GREETING: Short social interactions, introductions
-- DUAL_INTENT: Only when BOTH career guidance AND college recommendations are explicitly requested
 
-Respond with ONLY the category name: GREETING, ACADEMIC_HELP, COLLEGE_RECOMMENDATION, CAREER_GUIDANCE, or DUAL_INTENT""",
+Respond with ONLY the category name: GREETING, ACADEMIC_HELP, COLLEGE_RECOMMENDATION, COLLEGE_COMPARISON, COLLEGE_DETAILS, GENERAL_QUERY, or CAREER_GUIDANCE""",
             input_variables=["message"]
         )
         
         self.intent_chain = LLMChain(llm=self.llm, prompt=intent_prompt)
     
-    def detect_intent(self, message: str) -> Dict[str, bool]:
+    def detect_intent(self, message: str) -> Dict[str, Any]:
         """Detect user intent with high precision"""
         try:
             intent_result = self.intent_chain.run(message=message).strip().upper()
             logger.info(f"LLM Intent Classification: {intent_result} for message: '{message}'")
             
             if intent_result == "GREETING":
-                return {'academic': True, 'recommendation': False}
+                return {'type': 'academic', 'subtype': 'greeting'}
             elif intent_result == "ACADEMIC_HELP":
-                return {'academic': True, 'recommendation': False}
+                return {'type': 'academic', 'subtype': 'academic_help'}
             elif intent_result == "COLLEGE_RECOMMENDATION":
-                return {'academic': False, 'recommendation': True}
+                return {'type': 'recommendation', 'subtype': 'recommendation'}
+            elif intent_result == "COLLEGE_COMPARISON":
+                return {'type': 'comparison', 'subtype': 'comparison'}
+            elif intent_result == "COLLEGE_DETAILS":
+                return {'type': 'college_details', 'subtype': 'single_college'}
+            elif intent_result == "GENERAL_QUERY":
+                return {'type': 'general', 'subtype': 'general_knowledge'}
             elif intent_result == "CAREER_GUIDANCE":
-                return {'academic': True, 'recommendation': False}
-            elif intent_result == "DUAL_INTENT":
-                return {'academic': True, 'recommendation': True}
+                return {'type': 'academic', 'subtype': 'career_guidance'}
             else:
                 return self._fallback_detection(message)
                 
@@ -470,30 +497,46 @@ Respond with ONLY the category name: GREETING, ACADEMIC_HELP, COLLEGE_RECOMMENDA
             logger.error(f"Intent detection error: {e}")
             return self._fallback_detection(message)
     
-    def _fallback_detection(self, message: str) -> Dict[str, bool]:
+    def _fallback_detection(self, message: str) -> Dict[str, Any]:
         """Fallback rule-based intent detection"""
         message_lower = message.lower().strip()
         
+        # Check for comparison
+        comparison_keywords = ['compare', ' vs ', ' versus ', 'difference between', 'which is better']
+        if any(keyword in message_lower for keyword in comparison_keywords):
+            return {'type': 'comparison', 'subtype': 'comparison'}
+        
+        # Check for single college details
+        college_detail_patterns = ['tell me about', 'what about', 'information about', 'details about', 'explain about']
+        if any(pattern in message_lower for pattern in college_detail_patterns):
+            return {'type': 'college_details', 'subtype': 'single_college'}
+        
+        # Check for recommendations
         strong_rec_indicators = [
             'recommend college', 'suggest college', 'recommend university', 'suggest university',
             'which college should', 'which university should', 'best college for', 'best university for',
-            'list of college', 'list of university', 'colleges in', 'universities in',
-            'show me college', 'show me university', 'college recommendation', 'university recommendation',
-            'help me find college', 'help me find university', 'looking for college', 'looking for university'
+            'list of college', 'list of university', 'colleges in', 'universities in'
         ]
         
         if any(indicator in message_lower for indicator in strong_rec_indicators):
-            return {'academic': False, 'recommendation': True}
+            return {'type': 'recommendation', 'subtype': 'recommendation'}
         
+        # Check for greetings
         greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening']
         if any(message_lower.startswith(greeting) for greeting in greetings):
-            return {'academic': True, 'recommendation': False}
+            return {'type': 'academic', 'subtype': 'greeting'}
         
-        return {'academic': True, 'recommendation': False}
+        # Check for general queries (non-academic)
+        general_indicators = ['who won', 'latest news', 'current events', 'weather', 'sports', 'movie', 'recipe']
+        if any(indicator in message_lower for indicator in general_indicators):
+            return {'type': 'general', 'subtype': 'general_knowledge'}
+        
+        # Default to academic
+        return {'type': 'academic', 'subtype': 'academic_help'}
 
-class DualChainAcademicChatbot:
+class EnhancedAcademicChatbot:
     def __init__(self, openai_api_key: str, db_connection_string: str, model_name: str = "gpt-3.5-turbo"):
-        """Initialize the dual-chain chatbot with improved intent detection"""
+        """Initialize the enhanced chatbot with 5 intents"""
         
         self.openai_api_key = openai_api_key
         openai.api_key = openai_api_key
@@ -502,13 +545,13 @@ class DualChainAcademicChatbot:
         self.llm = ChatOpenAI(
             model_name=model_name,
             temperature=0.7,
-            max_tokens=500
+            max_tokens=800
         )
         
         self.academic_llm = ChatOpenAI(
             model_name=model_name,
             temperature=0.3,
-            max_tokens=500
+            max_tokens=800
         )
         
         # Initialize managers
@@ -516,7 +559,7 @@ class DualChainAcademicChatbot:
         self.college_data_manager = CollegeDataManager(db_connection_string)
         self.intent_detector = SmartIntentDetector(self.llm)
         
-        # Memory for both chains
+        # Memory for chains
         self.chat_memories = defaultdict(lambda: ConversationBufferWindowMemory(
             k=10,
             memory_key="chat_history",
@@ -532,7 +575,9 @@ class DualChainAcademicChatbot:
         # Setup chains
         self._setup_academic_chain()
         self._setup_recommendation_chain()
-        self._setup_fusion_chain()
+        self._setup_comparison_chain()
+        self._setup_college_details_chain()
+        self._setup_general_query_chain()
         self._setup_preference_extraction()
     
     def _setup_academic_chain(self):
@@ -541,7 +586,7 @@ class DualChainAcademicChatbot:
             ("system", """You are Alex, a friendly and knowledgeable academic assistant. You help with:
 - General academic questions and explanations across all subjects
 - Study strategies and learning techniques
-- Career guidance and educational pathways (general advice only, not specific college recommendations)
+- Career guidance and educational pathways (general advice only)
 - Subject-specific help (math, science, literature, etc.)
 - Exam preparation advice and study planning
 - Research methodologies and academic writing
@@ -552,7 +597,7 @@ Important Guidelines:
 - For greetings: Respond warmly and ask how you can help with their learning journey
 - For career guidance: Provide general advice about paths, skills, and opportunities
 - For academic help: Give detailed explanations with examples and actionable tips
-- DO NOT provide specific college recommendations - that's handled by a specialist
+- DO NOT provide specific college recommendations, comparisons, or details - those are handled by specialists
 
 Personality: Warm, encouraging, patient, conversational, and focused on educational growth."""),
             MessagesPlaceholder(variable_name="chat_history"),
@@ -575,7 +620,6 @@ Personality: Warm, encouraging, patient, conversational, and focused on educatio
 - Specific college and university recommendations across India
 - Detailed information about admission processes and entrance exams
 - Course details, fee structures, and program specifics
-- College comparisons and institutional rankings
 - Scholarship and financial aid opportunities
 - Campus facilities and placement records
 
@@ -586,7 +630,7 @@ Important Guidelines:
 - Be factual and specific rather than general
 - Always aim to recommend actual institutions when possible
 
-DO NOT provide general career advice - focus exclusively on college recommendations."""),
+DO NOT provide general career advice, comparisons, or single college details."""),
             MessagesPlaceholder(variable_name="recommendation_history"),
             ("human", "{input}"),
         ])
@@ -600,40 +644,115 @@ DO NOT provide general career advice - focus exclusively on college recommendati
             | StrOutputParser()
         )
     
-    def _setup_fusion_chain(self):
-        """Setup response fusion chain for dual intent queries"""
-        self.fusion_prompt = PromptTemplate(
-            template="""
-            COMBINE RESPONSES FROM TWO SPECIALISTS FOR A DUAL-INTENT QUERY:
-            
-            USER QUERY: {user_input}
-            
-            ACADEMIC GUIDANCE (General Education & Career Advice):
-            {academic_response}
-            
-            COLLEGE SPECIALIST (Specific Recommendations):
-            {recommendation_response}
-            
-            TASK:
-            Create a comprehensive response that:
-            1. Starts with the general academic/career guidance
-            2. Smoothly transitions to specific college recommendations
-            3. Maintains natural flow and removes redundancy
-            4. Provides both conceptual guidance AND actionable college options
-            5. Uses clear sections or transitions between the two aspects
-            
-            COMBINED RESPONSE:
-            """,
-            input_variables=["academic_response", "recommendation_response", "user_input"]
-        )
+    def _setup_comparison_chain(self):
+        """Setup college comparison chain"""
+        comparison_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a college comparison specialist. Your role is to provide detailed, objective comparisons between colleges based on various parameters:
+
+Comparison Parameters:
+- Fees and financial aspects
+- Courses offered and academic programs
+- Placement records and career opportunities
+- Campus facilities and infrastructure
+- Location and accessibility
+- Faculty and teaching quality
+- Admission process and eligibility
+- Rankings and accreditations
+- Student life and extracurricular activities
+
+Guidelines:
+- Provide balanced, factual comparisons
+- Use data and specific details when available
+- Highlight both similarities and differences
+- Be objective and avoid bias
+- Structure comparisons clearly with categories
+- Mention if certain information is not available
+
+DO NOT provide recommendations - only comparisons."""),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{input}\n\nCollege Data:\n{college_data}"),
+        ])
         
-        self.fusion_chain = (
-            {
-                "academic_response": RunnablePassthrough(),
-                "recommendation_response": RunnablePassthrough(),
-                "user_input": RunnablePassthrough()
-            }
-            | self.fusion_prompt
+        self.comparison_chain = (
+            RunnablePassthrough.assign(
+                chat_history=lambda x: self.chat_memories[x.get("chat_id", "default")].chat_memory.messages
+            )
+            | comparison_prompt
+            | self.llm
+            | StrOutputParser()
+        )
+    
+    def _setup_college_details_chain(self):
+        """Setup single college details chain"""
+        college_details_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a college information specialist. Your role is to provide comprehensive details about a specific college/university:
+
+Information to Cover:
+- Overview and history
+- Location and campus details
+- Academic programs and courses offered
+- Admission process and eligibility criteria
+- Fee structure
+- Faculty and teaching methodology
+- Infrastructure and facilities
+- Placement records
+- Rankings and accreditations
+- Notable alumni or achievements
+- Student life and activities
+- Scholarships and financial aid
+
+Guidelines:
+- Provide detailed, accurate information
+- Structure information clearly with sections
+- Be factual and comprehensive
+- Mention if certain information is not available
+- Focus on the specific college requested
+
+DO NOT compare with other colleges or provide recommendations."""),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{input}\n\nCollege Data:\n{college_data}"),
+        ])
+        
+        self.college_details_chain = (
+            RunnablePassthrough.assign(
+                chat_history=lambda x: self.chat_memories[x.get("chat_id", "default")].chat_memory.messages
+            )
+            | college_details_prompt
+            | self.llm
+            | StrOutputParser()
+        )
+    
+    def _setup_general_query_chain(self):
+        """Setup general knowledge query chain"""
+        general_prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a knowledgeable general assistant capable of answering a wide range of questions beyond academics:
+
+Topics You Can Handle:
+- Current events and news
+- Sports and entertainment
+- Science and technology (general)
+- History and geography
+- Culture and arts
+- General knowledge and facts
+- Everyday questions and curiosities
+
+Guidelines:
+- Provide accurate, helpful information
+- Be conversational and friendly
+- Admit when you don't know something
+- Keep responses concise but informative
+- Engage naturally with the user
+
+Note: For academic or college-related questions, politely redirect to your academic expertise."""),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{input}"),
+        ])
+        
+        self.general_query_chain = (
+            RunnablePassthrough.assign(
+                chat_history=lambda x: self.chat_memories[x.get("chat_id", "default")].chat_memory.messages
+            )
+            | general_prompt
             | self.llm
             | StrOutputParser()
         )
@@ -643,23 +762,13 @@ DO NOT provide general career advice - focus exclusively on college recommendati
         self.preference_parser = PydanticOutputParser(pydantic_object=UserPreferences)
         self.preference_prompt = PromptTemplate(
             template="""
-            Extract user preferences for college search from the conversation. Pay special attention to specific institution types.
+            Extract user preferences for college search from the conversation.
             
             Conversation History:
             {conversation_history}
             
             Current Message:
             {current_message}
-            
-            IMPORTANT: Look for specific institution types like:
-            - IIT (Indian Institute of Technology)
-            - NIT (National Institute of Technology) 
-            - IIIT (Indian Institute of Information Technology)
-            - AIIMS (All India Institute of Medical Sciences)
-            - IIM (Indian Institute of Management)
-            - BITS, VIT, SRM, Manipal, etc.
-            
-            If the user mentions any of these, set the specific_institution_type field accordingly.
             
             {format_instructions}
             
@@ -670,6 +779,123 @@ DO NOT provide general career advice - focus exclusively on college recommendati
         )
         
         self.preference_chain = LLMChain(llm=self.academic_llm, prompt=self.preference_prompt)
+    
+    def extract_college_names(self, message: str) -> List[str]:
+        """Extract college names from user message"""
+        try:
+            extraction_prompt = PromptTemplate(
+                template="""Extract all college/university names mentioned in this message. Return only the names, one per line.
+
+Message: {message}
+
+College names (one per line):""",
+                input_variables=["message"]
+            )
+            
+            chain = LLMChain(llm=self.llm, prompt=extraction_prompt)
+            result = chain.run(message=message)
+            
+            names = [name.strip() for name in result.split('\n') if name.strip()]
+            return names
+            
+        except Exception as e:
+            logger.error(f"Error extracting college names: {e}")
+            return []
+    
+    def compare_colleges(self, colleges: List[College]) -> str:
+        """Generate comparison data for colleges"""
+        if not colleges:
+            return "No college data available for comparison."
+        
+        comparison_data = "College Comparison Data:\n\n"
+        
+        for i, college in enumerate(colleges, 1):
+            comparison_data += f"College {i}: {college.name}\n"
+            comparison_data += f"- Location: {college.location}\n"
+            comparison_data += f"- Type: {college.type}\n"
+            comparison_data += f"- Affiliation: {college.affiliation}\n"
+            comparison_data += f"- Courses: {college.courses}\n"
+            comparison_data += f"- Admission Process: {college.admission_process}\n"
+            comparison_data += f"- Scholarship: {college.scholarship}\n"
+            comparison_data += f"- Website: {college.website}\n"
+            comparison_data += f"- Contact: {college.contact}\n\n"
+        
+        return comparison_data
+    
+    def get_college_details_data(self, college: College) -> str:
+        """Format single college data for details response"""
+        details = f"College Information for {college.name}:\n\n"
+        details += f"Name: {college.name}\n"
+        details += f"Location: {college.location}\n"
+        details += f"Type: {college.type}\n"
+        details += f"Affiliation: {college.affiliation}\n"
+        details += f"Courses Offered: {college.courses}\n"
+        details += f"Admission Process: {college.admission_process}\n"
+        details += f"Scholarship Available: {college.scholarship}\n"
+        details += f"Website: {college.website}\n"
+        details += f"Contact: {college.contact}\n"
+        details += f"Email: {college.email}\n"
+        
+        return details
+    
+    def get_openai_college_comparison(self, college_names: List[str]) -> str:
+        """Get college comparison from OpenAI when not in database"""
+        try:
+            colleges_str = ", ".join(college_names)
+            prompt = f"""Provide a detailed comparison of the following colleges in India: {colleges_str}
+
+Compare them based on:
+1. Fees and Financial Aspects
+2. Courses and Academic Programs
+3. Placement Records
+4. Campus Facilities
+5. Location and Accessibility
+6. Admission Process
+7. Rankings and Reputation
+
+Provide a structured, factual comparison."""
+
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logger.error(f"Error getting OpenAI comparison: {e}")
+            return f"Unable to fetch comparison data for {', '.join(college_names)}."
+    
+    def get_openai_college_details(self, college_name: str) -> str:
+        """Get single college details from OpenAI when not in database"""
+        try:
+            prompt = f"""Provide comprehensive information about {college_name} in India.
+
+Include details about:
+1. Overview and history
+2. Location and campus
+3. Academic programs and courses
+4. Admission process and eligibility
+5. Fee structure
+6. Infrastructure and facilities
+7. Placement records
+8. Rankings and accreditations
+9. Notable features or achievements
+
+Provide detailed, factual information in a well-structured format."""
+
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logger.error(f"Error getting OpenAI college details: {e}")
+            return f"Unable to fetch details for {college_name}."
     
     def extract_preferences_with_llm(self, chat_id: str, current_message: str) -> UserPreferences:
         """Extract user preferences using LLM"""
@@ -703,7 +929,7 @@ DO NOT provide general career advice - focus exclusively on college recommendati
             return UserPreferences()
     
     def get_openai_college_recommendations(self, preferences: UserPreferences, location: str = None) -> List[Dict]:
-        """Get college recommendations from OpenAI with improved handling of specific institutions"""
+        """Get college recommendations from OpenAI"""
         try:
             pref_parts = []
             
@@ -731,81 +957,25 @@ DO NOT provide general career advice - focus exclusively on college recommendati
             
             preference_text = ", ".join(pref_parts) if pref_parts else "General preferences"
             
-            if preferences.specific_institution_type:
-                institution_type = preferences.specific_institution_type.upper()
-                if institution_type == 'IIT':
-                    prompt = f"""
-                    List 5-7 IIT (Indian Institute of Technology) colleges in India for B.Tech programs.
-                    
-                    Provide response as a JSON array with this exact structure:
-                    [
-                        {{
-                            "id": "iit_college_id",
-                            "name": "IIT College Name",
-                            "location": "City, State",
-                            "type": "Government",
-                            "courses_offered": "B.Tech specializations offered",
-                            "website": "Official IIT website",
-                            "admission_process": "JEE Advanced + Counselling",
-                            "approximate_fees": "Fee range per year",
-                            "notable_features": "Key highlights of this IIT",
-                            "source": "openai_knowledge"
-                        }}
-                    ]
-                    
-                    Only include actual IIT colleges. Return only JSON:
-                    """
-                elif institution_type == 'NIT':
-                    prompt = f"""
-                    List 5-7 NIT (National Institute of Technology) colleges in India for engineering programs.
-                    
-                    Provide response as a JSON array with the exact structure shown above.
-                    Only include actual NIT colleges. Return only JSON:
-                    """
-                else:
-                    prompt = f"""
-                    Recommend 3-5 {institution_type} colleges/universities in India based on: {preference_text}
-                    
-                    Provide response as a JSON array with this structure:
-                    [
-                        {{
-                            "id": "unique_id",
-                            "name": "College Name",
-                            "location": "City, State",
-                            "type": "Government/Private/Deemed",
-                            "courses_offered": "Main courses",
-                            "website": "Official website",
-                            "admission_process": "Admission description",
-                            "approximate_fees": "Fee range",
-                            "notable_features": "Key highlights",
-                            "source": "openai_knowledge"
-                        }}
-                    ]
-                    
-                    Return only JSON:
-                    """
-            else:
-                prompt = f"""
-                Recommend 3-5 good colleges/universities in India based on: {preference_text}
-                
-                Provide response as a JSON array with this structure:
-                [
-                    {{
-                        "id": "unique_id",
-                        "name": "College Name",
-                        "location": "City, State",
-                        "type": "Government/Private/Deemed",
-                        "courses_offered": "Main courses",
-                        "website": "Official website",
-                        "admission_process": "Admission description",
-                        "approximate_fees": "Fee range",
-                        "notable_features": "Key highlights",
-                        "source": "openai_knowledge"
-                    }}
-                ]
-                
-                Return only JSON:
-                """
+            prompt = f"""Recommend 3-5 colleges/universities in India based on: {preference_text}
+
+Provide response as a JSON array with this structure:
+[
+    {{
+        "id": "unique_id",
+        "name": "College Name",
+        "location": "City, State",
+        "type": "Government/Private/Deemed",
+        "courses_offered": "Main courses",
+        "website": "Official website",
+        "admission_process": "Admission description",
+        "approximate_fees": "Fee range",
+        "notable_features": "Key highlights",
+        "source": "openai_knowledge"
+    }}
+]
+
+Return only JSON:"""
             
             response = openai.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -910,7 +1080,7 @@ DO NOT provide general career advice - focus exclusively on college recommendati
             return None
     
     def format_college_recommendations(self, filtered_colleges: List[Dict], openai_colleges: List[Dict], preferences: UserPreferences) -> Tuple[List[Dict], str]:
-        """Format college recommendations with clear prioritization of database results"""
+        """Format college recommendations"""
         recommendations = []
         database_count = 0
         openai_count = 0
@@ -922,17 +1092,15 @@ DO NOT provide general career advice - focus exclusively on college recommendati
             if json_rec:
                 recommendations.append(json_rec)
                 database_count += 1
-                logger.info(f"Added database college: {json_rec['name']}")
         
         if len(recommendations) < 5 and openai_colleges:
             needed = min(5 - len(recommendations), len(openai_colleges))
-            logger.info(f"Adding {needed} OpenAI colleges to supplement database results...")
+            logger.info(f"Adding {needed} OpenAI colleges...")
             for college in openai_colleges[:needed]:
                 json_rec = self.convert_openai_college_to_json(college)
                 if json_rec:
                     recommendations.append(json_rec)
                     openai_count += 1
-                    logger.info(f"Added OpenAI college: {json_rec['name']}")
         
         if recommendations:
             source_info = []
@@ -942,19 +1110,10 @@ DO NOT provide general career advice - focus exclusively on college recommendati
                 source_info.append(f"{openai_count} from AI knowledge")
             
             source_text = " (" + ", ".join(source_info) + ")" if source_info else ""
-            
-            text_summary = f"Found {len(recommendations)} colleges matching your preferences{source_text}:"
-            
-            for i, rec in enumerate(recommendations, 1):
-                source_indicator = " 🗄️" if rec['source'] == 'database' else " 🤖"
-                text_summary += f"\n{i}. {rec['name']} - {rec['location']} ({rec['type']}){source_indicator}"
+            text_summary = f"Found {len(recommendations)} colleges matching your preferences{source_text}"
         else:
-            if preferences.specific_institution_type:
-                text_summary = f"No {preferences.specific_institution_type} colleges found in database matching your criteria. You may need to adjust your preferences or the database may not contain these specific institutions."
-            else:
-                text_summary = "No colleges found matching your current preferences. Try adjusting your criteria."
+            text_summary = "No colleges found matching your criteria."
         
-        logger.info(f"Final recommendations: {len(recommendations)} total ({database_count} database, {openai_count} OpenAI)")
         return recommendations, text_summary
     
     def generate_conversation_title(self, message: str, chat_id: str) -> str:
@@ -985,7 +1144,7 @@ DO NOT provide general career advice - focus exclusively on college recommendati
             return "Academic Conversation"
     
     def get_response(self, message: str, chat_id: str) -> Dict[str, Any]:
-        """Main processing function with improved intent detection"""
+        """Main processing function with 5 intent types"""
         timestamp = datetime.now().isoformat()
         
         self.db_manager.save_message(chat_id, 'human', message, False)
@@ -1000,122 +1159,154 @@ DO NOT provide general career advice - focus exclusively on college recommendati
             conversation_title = "New Conversation"
         
         intent = self.intent_detector.detect_intent(message)
-        logger.info(f"Query: '{message}' | Detected intent: {intent}")
+        intent_type = intent['type']
+        logger.info(f"Query: '{message}' | Detected intent: {intent_type}")
         
-        academic_response = ""
-        recommendation_response = ""
+        response = ""
         recommendations_data = []
         is_recommendation = False
         
-        if intent['academic']:
-            try:
+        try:
+            if intent_type == 'academic':
+                # Handle academic queries and greetings
                 logger.info("Processing through Academic Chain...")
-                academic_response = self.academic_chain.invoke({
+                response = self.academic_chain.invoke({
                     "input": message,
                     "chat_id": chat_id
                 })
                 self.chat_memories[chat_id].save_context(
                     {"input": message},
-                    {"output": academic_response}
+                    {"output": response}
                 )
-                logger.info("✅ Academic chain completed successfully")
-            except Exception as e:
-                logger.error(f"❌ Academic chain error: {e}")
-                academic_response = "I'm having trouble processing your request. Please try again."
-        
-        if intent['recommendation']:
-            try:
+                
+            elif intent_type == 'recommendation':
+                # Handle college recommendations
                 logger.info("Processing through Recommendation Chain...")
-                
                 preferences = self.extract_preferences_with_llm(chat_id, message)
-                logger.info(f"Extracted preferences: {preferences}")
-                
                 filtered_colleges = self.college_data_manager.filter_colleges_by_preferences(preferences)
-                logger.info(f"Database colleges found: {len(filtered_colleges)}")
                 
                 openai_colleges = []
                 if len(filtered_colleges) < 3:
-                    logger.info("Insufficient database results, getting OpenAI recommendations...")
                     openai_colleges = self.get_openai_college_recommendations(preferences, preferences.location)
-                    logger.info(f"OpenAI colleges found: {len(openai_colleges)}")
-                else:
-                    logger.info("Sufficient database results found, skipping OpenAI recommendations")
                 
                 recommendations_data, summary_text = self.format_college_recommendations(
                     filtered_colleges, openai_colleges, preferences
                 )
                 
                 is_recommendation = len(recommendations_data) > 0
-                logger.info(f"Total recommendations prepared: {len(recommendations_data)}")
                 
-                recommendation_input = f"User is asking for college recommendations: {message}"
-                if recommendations_data:
-                    recommendation_input += f"\n\nI have found {len(recommendations_data)} matching colleges. Please provide a helpful response that guides the user about these college options and mentions that detailed information is available in the recommendations section."
-                
-                recommendation_response = self.recommendation_chain.invoke({
+                recommendation_input = f"{message}\n\nI have found {len(recommendations_data)} matching colleges."
+                response = self.recommendation_chain.invoke({
                     "input": recommendation_input,
                     "chat_id": chat_id
                 })
                 
                 self.recommendation_memories[chat_id].save_context(
                     {"input": message},
-                    {"output": recommendation_response}
+                    {"output": response}
                 )
                 
-                logger.info("✅ Recommendation chain completed successfully")
+            elif intent_type == 'comparison':
+                # Handle college comparison
+                logger.info("Processing through Comparison Chain...")
+                college_names = self.extract_college_names(message)
+                logger.info(f"Extracted college names: {college_names}")
                 
-            except Exception as e:
-                logger.error(f"❌ Recommendation chain error: {e}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                recommendation_response = "I encountered an issue while finding college recommendations. Please try rephrasing your request."
+                if len(college_names) < 2:
+                    response = "To compare colleges, please mention at least 2 college names. For example: 'Compare IIT Delhi and IIT Bombay'"
+                else:
+                    # Search in database first
+                    colleges = self.college_data_manager.search_colleges_for_comparison(college_names)
+                    
+                    if len(colleges) >= 2:
+                        # Found in database
+                        college_data = self.compare_colleges(colleges)
+                        response = self.comparison_chain.invoke({
+                            "input": message,
+                            "college_data": college_data,
+                            "chat_id": chat_id
+                        })
+                    else:
+                        # Use OpenAI knowledge
+                        logger.info(f"Colleges not found in database. Using OpenAI knowledge for: {college_names}")
+                        openai_comparison = self.get_openai_college_comparison(college_names)
+                        response = self.comparison_chain.invoke({
+                            "input": message,
+                            "college_data": openai_comparison,
+                            "chat_id": chat_id
+                        })
+                
+                self.chat_memories[chat_id].save_context(
+                    {"input": message},
+                    {"output": response}
+                )
+                
+            elif intent_type == 'college_details':
+                # Handle single college details
+                logger.info("Processing through College Details Chain...")
+                college_names = self.extract_college_names(message)
+                
+                if not college_names:
+                    response = "Please specify which college you'd like to know about. For example: 'Tell me about IIT Delhi'"
+                else:
+                    college_name = college_names[0]
+                    # Search in database first
+                    college = self.college_data_manager.search_college_by_name(college_name)
+                    
+                    if college:
+                        # Found in database
+                        college_data = self.get_college_details_data(college)
+                        response = self.college_details_chain.invoke({
+                            "input": message,
+                            "college_data": college_data,
+                            "chat_id": chat_id
+                        })
+                    else:
+                        # Use OpenAI knowledge
+                        logger.info(f"College '{college_name}' not found in database. Using OpenAI knowledge.")
+                        openai_details = self.get_openai_college_details(college_name)
+                        response = self.college_details_chain.invoke({
+                            "input": message,
+                            "college_data": openai_details,
+                            "chat_id": chat_id
+                        })
+                
+                self.chat_memories[chat_id].save_context(
+                    {"input": message},
+                    {"output": response}
+                )
+                
+            elif intent_type == 'general':
+                # Handle general queries
+                logger.info("Processing through General Query Chain...")
+                response = self.general_query_chain.invoke({
+                    "input": message,
+                    "chat_id": chat_id
+                })
+                self.chat_memories[chat_id].save_context(
+                    {"input": message},
+                    {"output": response}
+                )
+            
+            else:
+                response = "I'm here to help with academic questions, college recommendations, comparisons, and general queries. How can I assist you?"
         
-        final_response = self._create_final_response(
-            academic_response, recommendation_response, message, intent
-        )
+        except Exception as e:
+            logger.error(f"Error processing query: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            response = "I encountered an issue while processing your request. Please try rephrasing your question."
         
-        self.db_manager.save_message(chat_id, 'ai', final_response, is_recommendation)
+        self.db_manager.save_message(chat_id, 'ai', response, is_recommendation)
         
         return {
-            "response": final_response,
+            "response": response,
             "is_recommendation": is_recommendation,
             "timestamp": timestamp,
             "conversation_title": conversation_title,
-            "recommendations": recommendations_data
+            "recommendations": recommendations_data,
+            "intent_type": intent_type
         }
-    
-    def _create_final_response(self, academic_response: str, recommendation_response: str, 
-                              user_input: str, intent: Dict[str, bool]) -> str:
-        """Create final response based on intent and available responses"""
-        
-        if not academic_response and not recommendation_response:
-            return "I apologize, but I encountered an error while processing your request. Please try again, and I'll do my best to help!"
-        
-        if intent['academic'] and not intent['recommendation']:
-            return academic_response or "I'm here to help with your academic questions. Please try asking again."
-        
-        if intent['recommendation'] and not intent['academic']:
-            return recommendation_response or "I can help you find colleges. Please provide more details about your preferences."
-        
-        if intent['academic'] and intent['recommendation']:
-            if academic_response and recommendation_response:
-                try:
-                    logger.info("Fusing responses for dual intent query...")
-                    fused_response = self.fusion_chain.invoke({
-                        "academic_response": academic_response,
-                        "recommendation_response": recommendation_response,
-                        "user_input": user_input
-                    })
-                    return fused_response
-                except Exception as e:
-                    logger.error(f"Fusion error: {e}")
-                    return f"{academic_response}\n\n**College Recommendations:**\n{recommendation_response}"
-            elif academic_response:
-                return academic_response
-            elif recommendation_response:
-                return recommendation_response
-        
-        return academic_response or recommendation_response or "I'm here to help! Please ask me about academics or college recommendations."
 
 # Initialize environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -1129,10 +1320,10 @@ if not DB_CONNECTION_STRING:
     logger.error("DB_CONNECTION_STRING not found in environment variables")
     exit(1)
 
-# Initialize the dual-chain chatbot
+# Initialize the chatbot
 try:
-    chatbot = DualChainAcademicChatbot(OPENAI_API_KEY, DB_CONNECTION_STRING)
-    logger.info("✅ Fixed Dual-Chain Academic Chatbot with PostgreSQL initialized successfully")
+    chatbot = EnhancedAcademicChatbot(OPENAI_API_KEY, DB_CONNECTION_STRING)
+    logger.info("✅ Enhanced 5-Intent Academic Chatbot initialized successfully")
 except Exception as e:
     logger.error(f"❌ Error initializing chatbot: {e}")
     raise
@@ -1141,22 +1332,26 @@ except Exception as e:
 @app.get("/")
 async def root():
     return {
-        "message": "Fixed Dual-Chain Academic Chatbot API with PostgreSQL!",
-        "version": "3.0.0",
+        "message": "Enhanced 5-Intent Academic Chatbot API!",
+        "version": "4.0.0",
+        "intents": [
+            "🎓 Academic Help & Greetings",
+            "🏫 College Recommendations",
+            "⚖️ College Comparisons",
+            "🏛️ Single College Details",
+            "🌍 General Knowledge Queries"
+        ],
         "features": [
-            "🎯 Smart Intent Detection with LLM Classification",
-            "🎓 Academic Conversations & Guidance", 
-            "🏫 Precise College Recommendations",
-            "🧠 Context-Aware Response Generation",
-            "🔀 Intelligent Response Fusion",
-            "💬 Improved Greeting Handling",
-            "🐘 PostgreSQL Database Integration"
+            "Smart Intent Detection with LLM",
+            "Context-Aware Responses",
+            "Database + OpenAI Knowledge",
+            "PostgreSQL Integration"
         ]
     }
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, chat_id: str = Query(..., description="Chat ID managed by backend")):
-    """Enhanced chat endpoint with precise intent detection"""
+    """Enhanced chat endpoint with 5 intent types"""
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
     
@@ -1182,25 +1377,22 @@ async def health_check():
         return {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
-            "service": "Fixed Dual-Chain Academic Chatbot API with PostgreSQL",
-            "version": "3.0.0",
+            "service": "Enhanced 5-Intent Academic Chatbot API",
+            "version": "4.0.0",
             "database": "PostgreSQL connected",
             "college_data": f"{college_count} colleges loaded",
-            "features": {
-                "smart_intent_detection": "✅ LLM + Rule-based",
-                "academic_chain": "✅ Active",
-                "recommendation_chain": "✅ Active",
-                "response_fusion": "✅ Active",
-                "context_awareness": "✅ Active",
-                "greeting_handling": "✅ Enhanced",
-                "postgresql_integration": "✅ Active"
+            "intents": {
+                "academic_help": "✅ Active",
+                "college_recommendations": "✅ Active",
+                "college_comparison": "✅ Active",
+                "college_details": "✅ Active",
+                "general_queries": "✅ Active"
             }
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
 
-# Error handlers
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
     return {"error": "Endpoint not found", "status_code": 404}
@@ -1227,7 +1419,7 @@ if __name__ == "__main__":
         logger.error(f"❌ PostgreSQL connection failed: {e}")
         exit(1)
     
-    # Create database tables
+    # Initialize database
     try:
         chatbot.db_manager.init_database()
         logger.info("✅ Database initialized successfully")
@@ -1239,12 +1431,12 @@ if __name__ == "__main__":
     college_count = len(chatbot.college_data_manager.colleges)
     if college_count == 0:
         logger.warning("⚠️ No colleges found in database")
-        logger.warning("College recommendations will use OpenAI knowledge only")
+        logger.warning("Will use OpenAI knowledge for recommendations, comparisons, and details")
     else:
-        logger.info(f"✅ Loaded {college_count} colleges from PostgreSQL database")
+        logger.info(f"✅ Loaded {college_count} colleges from database")
     
-    logger.info("🚀 Starting Fixed Dual-Chain Academic Chatbot API with PostgreSQL...")
-    logger.info("🎯 Features: Smart Intent Detection + Academic Help + College Recommendations + PostgreSQL")
+    logger.info("🚀 Starting Enhanced 5-Intent Academic Chatbot API...")
+    logger.info("🎯 Intents: Academic | Recommendations | Comparison | Details | General")
     logger.info("🔗 API: http://localhost:8000")
     logger.info("📚 Docs: http://localhost:8000/docs")
     
